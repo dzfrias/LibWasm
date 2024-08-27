@@ -211,13 +211,14 @@ public struct Parser: ~Copyable {
         state = .funcBody(current: 0, max: count)
       case .data:
         module.datas = try parseVector { (parser) in try parser.parseDataSegment() }
+        if let expectedCount = module.dataCount {
+          guard module.datas.count == expectedCount else {
+            throw ValidationError.dataCountMismatch
+          }
+        }
         state = .sectionStart
       case .dataCount:
-        let count = try cursor.read(LEB: UInt32.self)
-        module.dataCount = count
-        guard count == module.datas.count else {
-          throw ValidationError.dataCountMismatch
-        }
+        module.dataCount = try cursor.read(LEB: UInt32.self)
         state = .sectionStart
       }
 
