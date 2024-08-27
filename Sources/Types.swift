@@ -198,50 +198,130 @@ public class Module {
   public var datas: [DataSegment] = []
   public var dataCount: UInt32? = nil
 
-  // The totals should comprise of locally-defined instances as well
-  // as imported ones. They are computed lazily and then cached.
-  private var computedTotalFunctions: Int? = nil
-  private var computedTotalTables: Int? = nil
-  private var computedTotalMemories: Int? = nil
-  private var computedTotalGlobals: Int? = nil
+  // The totals should comprise of the number of imported instances.
+  // They are computed lazily and then cached.
+  private var computedImportedFunctions: Int? = nil
+  private var computedImportedTables: Int? = nil
+  private var computedImportedMemories: Int? = nil
+  private var computedImportedGlobals: Int? = nil
+  
+  public func getImportedFunction(index: FunctionIndex) -> TypeIndex? {
+    var seen = 0
+    for import_ in imports {
+      guard case let .function(type) = import_.description else { continue }
+      if index == seen {
+        return type
+      }
+      seen += 1
+    }
+    return nil
+  }
 
-  public var totalFunctions: Int {
-    guard let total = computedTotalFunctions else {
+  public func getImportedTable(index: TableIndex) -> TableType? {
+    var seen = 0
+    for import_ in imports {
+      guard case let .table(type) = import_.description else { continue }
+      if index == seen {
+        return type
+      }
+      seen += 1
+    }
+    return nil
+  }
+  
+  public func getImportedMemory(index: MemoryIndex) -> MemoryType? {
+    var seen = 0
+    for import_ in imports {
+      guard case let .memory(type) = import_.description else { continue }
+      if index == seen {
+        return type
+      }
+      seen += 1
+    }
+    return nil
+  }
+
+  public func getImportedGlobal(index: GlobalIndex) -> GlobalType? {
+    var seen = 0
+    for import_ in imports {
+      guard case let .global(type) = import_.description else { continue }
+      if index == seen {
+        return type
+      }
+      seen += 1
+    }
+    return nil
+  }
+  
+  public var importedFunctions: Int {
+    guard let total = computedImportedFunctions else {
       computeTotals()
-      return computedTotalFunctions!
+      return computedImportedFunctions!
     }
     return total
   }
   
-  public var totalTables: Int {
-    guard let total = computedTotalTables else {
+  public var importedTables: Int {
+    guard let total = computedImportedTables else {
       computeTotals()
-      return computedTotalTables!
+      return computedImportedTables!
     }
     return total
+  }
+  
+  public var importedMemories: Int {
+    guard let total = computedImportedMemories else {
+      computeTotals()
+      return computedImportedMemories!
+    }
+    return total
+  }
+  
+  public var importedGlobals: Int {
+    guard let total = computedImportedGlobals else {
+      computeTotals()
+      return computedImportedGlobals!
+    }
+    return total
+  }
+
+  public var totalFunctions: Int {
+    guard let total = computedImportedFunctions else {
+      computeTotals()
+      return computedImportedFunctions! + functions.count
+    }
+    return total + functions.count
+  }
+  
+  public var totalTables: Int {
+    guard let total = computedImportedTables else {
+      computeTotals()
+      return computedImportedTables! + tables.count
+    }
+    return total + tables.count
   }
 
   public var totalMemories: Int {
-    guard let total = computedTotalMemories else {
+    guard let total = computedImportedMemories else {
       computeTotals()
-      return computedTotalMemories!
+      return computedImportedMemories! + memories.count
     }
-    return total
+    return total + memories.count
   }
 
   public var totalGlobals: Int {
-    guard let total = computedTotalGlobals else {
+    guard let total = computedImportedGlobals else {
       computeTotals()
-      return computedTotalGlobals!
+      return computedImportedGlobals! + globals.count
     }
-    return total
+    return total + globals.count
   }
 
   private func computeTotals() {
-    var numFuncs = functions.count
-    var numTables = tables.count
-    var numMemories = memories.count
-    var numGlobals = globals.count
+    var numFuncs = 0
+    var numTables = 0
+    var numMemories = 0
+    var numGlobals = 0
     for import_ in imports {
       switch import_.description {
       case .function:
@@ -254,9 +334,9 @@ public class Module {
         numGlobals += 1
       }
     }
-    computedTotalFunctions = numFuncs
-    computedTotalTables = numTables
-    computedTotalMemories = numMemories
-    computedTotalGlobals = numGlobals
+    computedImportedFunctions = numFuncs
+    computedImportedTables = numTables
+    computedImportedMemories = numMemories
+    computedImportedGlobals = numGlobals
   }
 }

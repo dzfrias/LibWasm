@@ -21,6 +21,8 @@ public enum ParseError: Error {
 public protocol WasmReader {
   mutating func readValueType() throws -> ValueType
   mutating func readBlockType() throws -> BlockType
+  mutating func readMemArg() throws -> MemArg
+  mutating func readBrTable() throws -> BrTable
 }
 
 extension Cursor: WasmReader {
@@ -81,6 +83,46 @@ extension Cursor: WasmReader {
   }
 }
 
+private class ValidationTask {
+  private struct Input {
+    public let data: Data
+    public let locals: [Function.Locals]
+    public let type: FunctionType
+  }
+  
+  private let stream: AsyncStream<Input>
+  private let continuation: AsyncStream<Input>.Continuation
+  private var task: Task<Void, Error>? = nil
+  
+  public init(for module: Module) {
+    (stream, continuation) = AsyncStream.makeStream()
+    task = nil
+    task = Task {
+      try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+        for await function in self.stream {
+          taskGroup.addTask {
+            var validator = CodeValidator(for: module)
+            try validator.validate(data: function.data, locals: function.locals, type: function.type)
+          }
+        }
+        try await taskGroup.next()
+      }
+    }
+  }
+  
+  public func validate(data: Data, locals: [Function.Locals], type: FunctionType) {
+    continuation.yield(Input(data: data, locals: locals, type: type))
+  }
+  
+  public func finish() {
+    continuation.finish()
+  }
+  
+  public func awaitCompletion() async throws {
+    try await task!.value
+  }
+}
+
 /// A parser for the WebAssembly binary format.
 ///
 /// The `Parser` will simultaneously validate a WebAssembly module as 
@@ -100,14 +142,17 @@ public struct Parser: ~Copyable {
     case funcBodyWithSize(current: UInt32, max: UInt32, size: UInt32)
   }
 
-  private var module: Module = Module()
-  private var cursor: Cursor = Cursor()
+  private var module = Module()
+  private var cursor = Cursor()
   private var state: State = .magic
-  private var codeValidator: CodeValidator
+  // This validator is used for init expressions only
+  private var validator: CodeValidator
+  private let validationTask: ValidationTask
 
   /// Creates a new parser.
   public init() {
-    codeValidator = CodeValidator(for: module)
+    validator = CodeValidator(for: module)
+    validationTask = ValidationTask(for: module)
   }
   
   /// Pushes a payload into the parser.
@@ -118,7 +163,8 @@ public struct Parser: ~Copyable {
 
   /// Signals to the parser that no more payloads should be received,
   /// returning the produced module.
-  public consuming func finish() throws -> Module {
+  public consuming func finish() async throws -> Module {
+    try await validationTask.awaitCompletion()
     // If there cursor is not at eof by now, an actual eof error occured
     guard cursor.isAtEof else {
       throw ReadError.unexpectedEof
@@ -229,6 +275,7 @@ public struct Parser: ~Copyable {
         guard module.codes.count == module.functions.count else {
           throw ValidationError.codeCountMismatch
         }
+        validationTask.finish()
       } else {
         let size = try cursor.read(LEB: UInt32.self)
         state = .funcBodyWithSize(current: current, max: max, size: size)
@@ -326,7 +373,7 @@ public struct Parser: ~Copyable {
   }
 
   private mutating func parseInitExpression(expected type: ValueType) throws -> Expression {
-    let consumed = try codeValidator.validateInitExpr(data: cursor.rest, expected: type)
+    let consumed = try validator.validateInitExpr(data: cursor.rest, expected: type)
     let data = try cursor.read(count: consumed)
     return Expression(data: data)
   }
@@ -501,15 +548,14 @@ public struct Parser: ~Copyable {
       return Function.Locals(n: typeCount, type: type)
     }
     let body = try cursor.read(count: Int(size) - (cursor.pos - startPos))
-    try codeValidator.validate(data: body, locals: allLocals, type: type)
+    validationTask.validate(data: body, locals: allLocals, type: type)
     return Function(locals: allLocals, body: Expression(data: body))
   }
 
   private mutating func parseCustomSection(size: UInt32) throws -> CustomSection {
     let startPos = cursor.pos
     let name = try parseName()
-    let endPos = cursor.pos
-    let buffer = try cursor.read(count: Int(size) - (endPos - startPos))
+    let buffer = try cursor.read(count: Int(size) - (cursor.pos - startPos))
     let contents = String(decoding: buffer, as: UTF8.self)
     guard contents.isContiguousUTF8 else {
       throw ParseError.invalidUtf8

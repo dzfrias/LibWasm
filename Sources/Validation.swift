@@ -69,7 +69,7 @@ public struct CodeValidator: ~Copyable {
       }
       return type == .v128
     }
-    
+
     public var isReference: Bool {
       guard case let .known(type) = self else {
         return true
@@ -81,21 +81,13 @@ public struct CodeValidator: ~Copyable {
       return self == .unknown
     }
   }
-  
+
   private enum MemoryInstructionKind {
     case load
     case store
   }
 
   private var module: Module
-  // These hold both imported and module-defined instances. These are
-  // computed when the first function is validated.
-  private var globals: [GlobalType] = []
-  private var functions: [FunctionType] = []
-  private var tables: [TableType] = []
-  // Keeps track if the above properties have already been computed
-  // so that we don't redo the work.
-  private var hasComputedSections = false
 
   // State depdendent on the function body being validated
   private var valueStack: [StackEntry] = []
@@ -105,17 +97,15 @@ public struct CodeValidator: ~Copyable {
   private var functionType: FunctionType = FunctionType(parameters: [], results: [])
 
   private var currentFrame: Frame { frames.last! }
-  
+
   /// Creates a new code validator for the given module.
   public init(for module: Module) {
     self.module = module
   }
-  
 
   /// Validates the passed byte buffer, ensuring that it respresents a
   /// valid sequence of WebAssembly instructions.
   public mutating func validate(data: Data, locals: [Function.Locals], type: FunctionType) throws {
-    computeSections()
     cursor = Cursor(for: data)
     functionType = type
     self.locals = functionType.parameters
@@ -130,11 +120,6 @@ public struct CodeValidator: ~Copyable {
       let opcode = try cursor.readOpcode()
       try validate(opcode: opcode)
     }
-    
-    // Reset function-specific state.
-    self.locals.removeAll(keepingCapacity: true)
-    frames.removeAll(keepingCapacity: true)
-    valueStack.removeAll(keepingCapacity: true)
   }
 
   /// Validates a given byte buffer as an initialization expression, producing an
@@ -145,7 +130,6 @@ public struct CodeValidator: ~Copyable {
     // Do not build the cache when generating init exprs! They appear in
     // arbitrary places in the module, so we don't know if the necessary
     // information has been parsed into the module yet.
-    computeSections(cache: false)
     cursor = Cursor(for: data)
     functionType = FunctionType(parameters: [], results: [expected])
     appendFrame(kind: .function, type: functionType)
@@ -159,37 +143,6 @@ public struct CodeValidator: ~Copyable {
     }
     return cursor.pos
   }
-
-  private mutating func computeSections(cache: Bool = true) {
-    if hasComputedSections { return }
-    globals = []
-    functions = []
-    tables = []
-    for import_ in module.imports {
-      switch import_.description {
-      case .function(let typeIndex):
-        functions.append(module.types[Int(typeIndex)])
-      case .table(let tableType):
-        tables.append(tableType)
-      case .global(let globalType):
-        globals.append(globalType)
-      default: continue
-      }
-    }
-    for global in module.globals {
-      globals.append(global.type)
-    }
-    for index in module.functions {
-      functions.append(module.types[Int(index)])
-    }
-    for table in module.tables {
-      tables.append(table.type)
-    }
-    if cache {
-      hasComputedSections = true
-    }
-  }
-  
 
   @discardableResult
   private mutating func popValue() throws -> StackEntry {
@@ -250,7 +203,8 @@ public struct CodeValidator: ~Copyable {
     }
     try popValues(types: currentFrame.type.results)
     guard valueStack.count == currentFrame.initCount else {
-      throw ValidationError.stackHeightMismatch(expected: currentFrame.initCount, got: valueStack.count)
+      throw ValidationError.stackHeightMismatch(
+        expected: currentFrame.initCount, got: valueStack.count)
     }
     return frames.popLast()!
   }
@@ -389,17 +343,11 @@ public struct CodeValidator: ~Copyable {
     // Global instructions
     case .globalGet:
       let index = try cursor.read(LEB: GlobalIndex.self)
-      guard index < globals.count else {
-        throw ValidationError.invalidGlobalIndex
-      }
-      let global = globals[Int(index)]
+      let global = try getGlobal(index: index)
       appendValue(.known(type: global.valueType))
     case .globalSet:
       let index = try cursor.read(LEB: GlobalIndex.self)
-      guard index < globals.count else {
-        throw ValidationError.invalidGlobalIndex
-      }
-      let global = globals[Int(index)]
+      let global = try getGlobal(index: index)
       guard global.mutability == .mutable else {
         throw ValidationError.invalidGlobalSet
       }
@@ -407,19 +355,14 @@ public struct CodeValidator: ~Copyable {
 
     case .call:
       let index = try cursor.read(LEB: FunctionIndex.self)
-      guard index < functions.count else {
-        throw ValidationError.invalidFunctionIndex
-      }
-      let funcType = functions[Int(index)]
+      let typeIndex = try getFunction(index: index)
+      let funcType = module.types[Int(typeIndex)]
       try popValues(types: funcType.parameters)
       appendValues(funcType.results)
     case .callIndirect:
       let typeIndex = try cursor.read(LEB: TypeIndex.self)
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let table = tables[Int(tableIndex)]
+      let table = try getTable(index: tableIndex)
       guard table.elementType == .funcref else {
         throw ValidationError.canOnlyCallFuncref
       }
@@ -641,9 +584,7 @@ public struct CodeValidator: ~Copyable {
       appendValue(.known(type: .i32))
     case .refFunc:
       let index = try cursor.read(LEB: FunctionIndex.self)
-      guard index < functions.count else {
-        throw ValidationError.invalidFunctionIndex
-      }
+      try getFunction(index: index)
       appendValue(.known(type: .funcref))
     case .refIsNull:
       let value = try popValue()
@@ -663,11 +604,8 @@ public struct CodeValidator: ~Copyable {
     case .tableCopy:
       let dst = try cursor.read(LEB: TableIndex.self)
       let src = try cursor.read(LEB: TableIndex.self)
-      guard dst < tables.count && src < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let dstTable = tables[Int(dst)]
-      let srcTable = tables[Int(src)]
+      let dstTable = try getTable(index: dst)
+      let srcTable = try getTable(index: src)
       guard dstTable.elementType == srcTable.elementType else {
         throw ValidationError.tableValueTypeMismatch
       }
@@ -676,19 +614,13 @@ public struct CodeValidator: ~Copyable {
       try popValue(type: .i32)
     case .tableFill, .tableGrow:
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let table = tables[Int(tableIndex)]
+      let table = try getTable(index: tableIndex)
       try popValue(type: .i32)
       try popValue(type: table.elementType)
       try popValue(type: .i32)
     case .tableSet:
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let table = tables[Int(tableIndex)]
+      let table = try getTable(index: tableIndex)
       try popValue(type: table.elementType)
       try popValue(type: .i32)
     case .tableInit:
@@ -697,10 +629,7 @@ public struct CodeValidator: ~Copyable {
         throw ValidationError.invalidElementIndex
       }
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let table = tables[Int(tableIndex)]
+      let table = try getTable(index: tableIndex)
       let element = module.elements[Int(elementIndex)]
       guard table.elementType == element.type else {
         throw ValidationError.tableValueTypeMismatch
@@ -710,22 +639,21 @@ public struct CodeValidator: ~Copyable {
       try popValue(type: .i32)
     case .tableGet:
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
-        throw ValidationError.invalidTableIndex
-      }
-      let table = tables[Int(tableIndex)]
+      let table = try getTable(index: tableIndex)
       try popValue(type: .i32)
       appendValue(.known(type: table.elementType))
     case .tableSize:
       let tableIndex = try cursor.read(LEB: TableIndex.self)
-      guard tableIndex < tables.count else {
+      guard tableIndex < module.totalTables else {
         throw ValidationError.invalidTableIndex
       }
       appendValue(.known(type: .i32))
     }
   }
-  
-  private mutating func validateMemory(_ kind: MemoryInstructionKind, type: ValueType, size: UInt32? = nil) throws {
+
+  private mutating func validateMemory(
+    _ kind: MemoryInstructionKind, type: ValueType, size: UInt32? = nil
+  ) throws {
     let memArg = try cursor.readMemArg()
     guard memArg.memoryIndex < module.totalMemories else {
       throw ValidationError.invalidMemoryIndex
@@ -742,5 +670,41 @@ public struct CodeValidator: ~Copyable {
       try popValue(type: type)
       try popValue(type: .i32)
     }
+  }
+
+  @discardableResult
+  private func getGlobal(index: GlobalIndex) throws -> GlobalType {
+    if index < module.importedGlobals {
+      return module.getImportedGlobal(index: index)!
+    }
+    let baseIndex = Int(index) - module.importedGlobals
+    guard baseIndex < module.globals.count else {
+      throw ValidationError.invalidGlobalIndex
+    }
+    return module.globals[Int(index) - module.importedGlobals].type
+  }
+
+  @discardableResult
+  private func getFunction(index: FunctionIndex) throws -> TypeIndex {
+    if index < module.importedFunctions {
+      return module.getImportedFunction(index: index)!
+    }
+    let baseIndex = Int(index) - module.importedFunctions
+    guard baseIndex < module.functions.count else {
+      throw ValidationError.invalidFunctionIndex
+    }
+    return module.functions[Int(index) - module.importedFunctions]
+  }
+
+  @discardableResult
+  private func getTable(index: TableIndex) throws -> TableType {
+    if index < module.importedTables {
+      return module.getImportedTable(index: index)!
+    }
+    let baseIndex = Int(index) - module.importedTables
+    guard baseIndex < module.tables.count else {
+      throw ValidationError.invalidTableIndex
+    }
+    return module.tables[baseIndex].type
   }
 }

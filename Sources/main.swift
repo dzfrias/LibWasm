@@ -1,6 +1,6 @@
 import Foundation
 
-func readFileInChunks(url: URL, chunkSize: Int) {
+func readFileInChunks(url: URL, chunkSize: Int) async {
   do {
     let fileHandle = try FileHandle(forReadingFrom: url)
     defer {
@@ -16,11 +16,11 @@ func readFileInChunks(url: URL, chunkSize: Int) {
 
       try parser.push(buf: data)
     }
-    let m = try parser.finish()
+    let m = try await parser.finish()
     print("\(m.types.count)")
   } catch {
     print("Error reading file: \(error)")
   }
 }
 
-readFileInChunks(url: URL(fileURLWithPath: "/Users/dzfrias/code/LibWasm/spidermonkey.wasm"), chunkSize: 1024)
+await readFileInChunks(url: URL(fileURLWithPath: "/Users/dzfrias/code/LibWasm/spidermonkey.wasm"), chunkSize: 1024)
