@@ -2,18 +2,18 @@ import Foundation
 
 /// An error that occurs when parsing the WebAssembly binary format.
 public enum ParseError: Error {
-  case invalidModuleMagic
-  case invalidVersion
-  case invalidSectionId
-  case invalidFunctionTypeTag
-  case invalidValueTypeTag
-  case invalidUtf8
-  case invalidExternTag
-  case expectedReferenceType
-  case invalidLimitsFlag
-  case invalidMutabilityFlag
-  case invalidElementTag
-  case invalidDataTag
+  case invalidModuleMagic(got: Data)
+  case invalidVersion(got: Data)
+  case invalidSectionId(got: UInt8)
+  case invalidFunctionTypeTag(got: UInt8)
+  case invalidValueTypeTag(got: UInt8)
+  case invalidUtf8(got: Data)
+  case invalidExternTag(got: UInt8)
+  case expectedReferenceType(got: ValueType)
+  case invalidLimitsFlag(got: UInt8)
+  case invalidMutabilityFlag(got: UInt8)
+  case invalidElementTag(got: UInt8)
+  case invalidDataTag(got: UInt8)
 }
 
 /// A protocol for extending `Cursor` with reading capabilities specifc
@@ -42,7 +42,7 @@ extension Cursor: WasmReader {
     case 0x6F:
       return ValueType.externref
     default:
-      throw ParseError.invalidValueTypeTag
+      throw ParseError.invalidValueTypeTag(got: tag)
     }
   }
   
@@ -192,7 +192,7 @@ public struct Parser: ~Copyable {
       let expected = Data([0, 97, 115, 109])
       let buf = try cursor.read(count: 4)
       guard buf == expected else {
-        throw ParseError.invalidModuleMagic
+        throw ParseError.invalidModuleMagic(got: buf)
       }
       state = .version
  
@@ -200,7 +200,7 @@ public struct Parser: ~Copyable {
       let expected = Data([1, 0, 0, 0])
       let buf = try cursor.read(count: 4)
       guard buf == expected else {
-        throw ParseError.invalidVersion
+        throw ParseError.invalidVersion(got: buf)
       }
       state = .sectionStart
 
@@ -259,7 +259,7 @@ public struct Parser: ~Copyable {
         module.datas = try parseVector { (parser) in try parser.parseDataSegment() }
         if let expectedCount = module.dataCount {
           guard module.datas.count == expectedCount else {
-            throw ValidationError.dataCountMismatch
+            throw ValidationError(message: "data count mismatch: expected \(expectedCount) but got \(module.datas.count)")
           }
         }
         state = .sectionStart
@@ -273,7 +273,7 @@ public struct Parser: ~Copyable {
       if current == max {
         state = .sectionStart
         guard module.codes.count == module.functions.count else {
-          throw ValidationError.codeCountMismatch
+          throw ValidationError(message: "expected \(module.functions.count) functions but there are \(module.codes.count) code bodies")
         }
         validationTask.finish()
       } else {
@@ -283,7 +283,7 @@ public struct Parser: ~Copyable {
 
     case .funcBodyWithSize(let current, let max, let size):
       guard current < module.functions.count else {
-        throw ValidationError.invalidFunctionIndex
+        throw ValidationError.invalidFunctionIndex(current)
       }
       let function = try parseFunction(size: size, type: module.types[Int(module.functions[Int(current)])])
       let code = Code(size: size, function: function)
@@ -312,7 +312,7 @@ public struct Parser: ~Copyable {
     let data = try parseData()
     let string = String(decoding: data, as: UTF8.self)
     guard string.isContiguousUTF8 else {
-      throw ParseError.invalidUtf8
+      throw ParseError.invalidUtf8(got: data)
     }
     return string
   }
@@ -320,19 +320,22 @@ public struct Parser: ~Copyable {
   private mutating func parseLimits(bound: UInt64) throws -> Limits {
     let flag = try cursor.readByte()
     guard flag <= 1 else {
-      throw ParseError.invalidLimitsFlag
+      throw ParseError.invalidLimitsFlag(got: flag)
     }
 
     let min = try cursor.read(LEB: UInt32.self)
     guard min <= bound else {
-      throw ValidationError.invalidLimits
+      throw ValidationError(message: "limit endpoint (\(min)) not in the bounds of \(bound)")
     }
     var max: UInt32? = nil
     if flag == 1 {
       let value = try cursor.read(LEB: UInt32.self)
       max = value
-      guard value >= min && value <= bound else {
-        throw ValidationError.invalidLimits
+      guard value <= bound else {
+      throw ValidationError(message: "limit endpoint (\(value)) not in the bounds of \(bound)")
+      }
+      guard value >= min else {
+        throw ValidationError(message: "limit min (\(min)) cannot be greater than max (\(value))")
       }
     }
     return Limits(min: min, max: max)
@@ -368,7 +371,7 @@ public struct Parser: ~Copyable {
     case 0x0c:
       return .dataCount
     default:
-      throw ParseError.invalidSectionId
+      throw ParseError.invalidSectionId(got: id)
     }
   }
 
@@ -381,7 +384,7 @@ public struct Parser: ~Copyable {
   private mutating func parseFunctionType() throws -> FunctionType {
     let tag = try cursor.readByte()
     guard tag == 0x60 else {
-      throw ParseError.invalidFunctionTypeTag
+      throw ParseError.invalidFunctionTypeTag(got: tag)
     }
 
     let params = try parseVector { (parser) in try parser.cursor.readValueType() }
@@ -393,7 +396,7 @@ public struct Parser: ~Copyable {
   private mutating func parseTableType() throws -> TableType {
     let type = try cursor.readValueType()
     guard type.isReference else {
-      throw ParseError.expectedReferenceType
+      throw ParseError.expectedReferenceType(got: type)
     }
     let limits = try parseLimits(bound: (1 << 32) - 1)
 
@@ -409,7 +412,7 @@ public struct Parser: ~Copyable {
     let type = try cursor.readValueType()
     let mutabilityFlag = try cursor.readByte()
     guard mutabilityFlag <= 1 else {
-      throw ParseError.invalidMutabilityFlag
+      throw ParseError.invalidMutabilityFlag(got: mutabilityFlag)
     }
     return GlobalType(valueType: type, mutability: mutabilityFlag == 1 ? .mutable : .immutable)
   }
@@ -432,7 +435,7 @@ public struct Parser: ~Copyable {
       let index = try parseGlobalIndex()
       return Export(name: name, description: .global(index))
     default:
-      throw ParseError.invalidExternTag
+      throw ParseError.invalidExternTag(got: tag)
     }
   }
 
@@ -455,7 +458,7 @@ public struct Parser: ~Copyable {
       let globalType = try parseGlobalType()
       return Import(module: moduleName, name: name, description: .global(globalType))
     default:
-      throw ParseError.invalidExternTag
+      throw ParseError.invalidExternTag(got: tag)
     }
   }
 
@@ -476,7 +479,7 @@ public struct Parser: ~Copyable {
   private mutating func parseElement() throws -> Element {
     let tag = try cursor.readByte()
     guard tag <= 0x07 else {
-      throw ParseError.invalidElementTag
+      throw ParseError.invalidElementTag(got: tag)
     }
 
     let hasPassive = (tag & 0x01) != 0
@@ -497,12 +500,12 @@ public struct Parser: ~Copyable {
       if hasExprs {
         type = try cursor.readValueType()
         guard type.isReference else {
-          throw ParseError.expectedReferenceType
+          throw ParseError.expectedReferenceType(got: type)
         }
       } else {
         let externTag = try cursor.readByte()
         guard externTag == 0x00 else {
-          throw ParseError.invalidExternTag
+          throw ParseError.invalidExternTag(got: externTag)
         }
       }
     }
@@ -536,7 +539,7 @@ public struct Parser: ~Copyable {
       let data = try parseData()
       return DataSegment(data: data, memoryIndex: index, offset: expr)
     default:
-      throw ParseError.invalidDataTag
+      throw ParseError.invalidDataTag(got: tag)
     }
   }
   
@@ -558,7 +561,7 @@ public struct Parser: ~Copyable {
     let buffer = try cursor.read(count: Int(size) - (cursor.pos - startPos))
     let contents = String(decoding: buffer, as: UTF8.self)
     guard contents.isContiguousUTF8 else {
-      throw ParseError.invalidUtf8
+      throw ParseError.invalidUtf8(got: buffer)
     }
     return CustomSection(name: name, contents: contents)
   }
@@ -566,7 +569,7 @@ public struct Parser: ~Copyable {
   private mutating func parseFunctionIndex() throws -> FunctionIndex {
     let index = try cursor.read(LEB: FunctionIndex.self)
     guard index < module.totalFunctions else {
-      throw ValidationError.invalidFunctionIndex
+      throw ValidationError.invalidFunctionIndex(index)
     }
     return index
   }
@@ -574,7 +577,7 @@ public struct Parser: ~Copyable {
   private mutating func parseTableIndex() throws -> TableIndex {
     let index = try cursor.read(LEB: TableIndex.self)
     guard index < module.totalTables else {
-      throw ValidationError.invalidTableIndex
+      throw ValidationError.invalidTableIndex(index)
     }
     return index
   }
@@ -582,7 +585,7 @@ public struct Parser: ~Copyable {
   private mutating func parseMemoryIndex() throws -> MemoryIndex {
     let index = try cursor.read(LEB: MemoryIndex.self)
     guard index < module.totalMemories else {
-      throw ValidationError.invalidMemoryIndex
+      throw ValidationError.invalidMemoryIndex(index)
     }
     return index
   }
@@ -590,7 +593,7 @@ public struct Parser: ~Copyable {
   private mutating func parseGlobalIndex() throws -> GlobalIndex {
     let index = try cursor.read(LEB: GlobalIndex.self)
     guard index < module.totalGlobals else {
-      throw ValidationError.invalidGlobalIndex
+      throw ValidationError.invalidGlobalIndex(index)
     }
     return index
   }
@@ -598,7 +601,7 @@ public struct Parser: ~Copyable {
   private mutating func parseTypeIndex() throws -> TypeIndex {
     let index = try cursor.read(LEB: TypeIndex.self)
     guard index < module.types.count else {
-      throw ValidationError.invalidTypeIndex
+      throw ValidationError.invalidTypeIndex(index)
     }
     return index
   }

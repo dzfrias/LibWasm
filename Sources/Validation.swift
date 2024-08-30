@@ -1,34 +1,43 @@
 import Foundation
 
-/// An error that occurs when validating a WebAssembly module.
-public enum ValidationError: Error {
-  case invalidLimits
-  case invalidFunctionIndex
-  case invalidTableIndex
-  case invalidMemoryIndex
-  case invalidGlobalIndex
-  case invalidTypeIndex
-  case invalidDataIndex
-  case invalidElementIndex
-  case dataCountMismatch
-  case codeCountMismatch
-  case stackHeightMismatch(expected: Int, got: Int)
-  case unexpectedType(expected: ValueType, got: ValueType)
-  case stackEmpty
-  case noFramesLeft
-  case invalidSelectType
-  case hangingElse
-  case invalidLabelIndex
-  case brTableArityMismatch
-  case invalidLocalIndex
-  case invalidGlobalSet
-  case missingDataCount
-  case invalidAlignment
-  case canOnlyCallFuncref
-  case expectedReference
-  case tableValueTypeMismatch
-  case expectedNonReference
-  case invalidInitExprInstruction(Opcode)
+public struct ValidationError: Error {
+  public let message: String
+  
+  public static func invalidFunctionIndex(_ i: FunctionIndex) -> Self {
+    return ValidationError(message: "invalid function index: \(i)")
+  }
+
+  public static func invalidTableIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid table index: \(i)")
+  }
+
+  public static func invalidMemoryIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid memory index: \(i)")
+  }
+
+  public static func invalidGlobalIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid global index: \(i)")
+  }
+
+  public static func invalidDataIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid data index: \(i)")
+  }
+
+  public static func invalidTypeIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid type index: \(i)")
+  }
+
+  public static func invalidElementIndex(_ i: TableIndex) -> Self {
+    return ValidationError(message: "invalid element index: \(i)")
+  }
+
+  public static func invalidLabelIndex(_ i: LabelIndex) -> Self {
+    return ValidationError(message: "invalid label index: \(i)")
+  }
+
+  public static func invalidLocalIndex(_ i: LabelIndex) -> Self {
+    return ValidationError(message: "invalid local index: \(i)")
+  }
 }
 
 /// A validator for WebAssembly function bodies.
@@ -137,7 +146,7 @@ public struct CodeValidator: ~Copyable {
     while !frames.isEmpty {
       let opcode = try cursor.readOpcode()
       guard opcode.isConstant || opcode == .end else {
-        throw ValidationError.invalidInitExprInstruction(opcode)
+        throw ValidationError(message: "invalid init expr instruction: \(opcode)")
       }
       try validate(opcode: opcode)
     }
@@ -148,7 +157,7 @@ public struct CodeValidator: ~Copyable {
   private mutating func popValue() throws -> StackEntry {
     if valueStack.count == currentFrame.initCount && currentFrame.unreachable { return .unknown }
     guard valueStack.count != currentFrame.initCount else {
-      throw ValidationError.stackEmpty
+      throw ValidationError(message: "value stack is empty, but a pop was attempted")
     }
     return valueStack.popLast()!
   }
@@ -157,7 +166,7 @@ public struct CodeValidator: ~Copyable {
     let actual = try popValue()
     guard case let .known(type: actualType) = actual else { return }
     guard actualType == type else {
-      throw ValidationError.unexpectedType(expected: type, got: actualType)
+      throw ValidationError(message: "unexpected type: expected \(type) got \(actualType)")
     }
   }
 
@@ -199,19 +208,18 @@ public struct CodeValidator: ~Copyable {
 
   private mutating func popFrame() throws -> Frame {
     guard !frames.isEmpty else {
-      throw ValidationError.noFramesLeft
+      throw ValidationError(message: "a pop of a control frame was attempted, but there are none left")
     }
     try popValues(types: currentFrame.type.results)
     guard valueStack.count == currentFrame.initCount else {
-      throw ValidationError.stackHeightMismatch(
-        expected: currentFrame.initCount, got: valueStack.count)
+      throw ValidationError(message: "stack height mismatch: expected \(currentFrame.initCount) but got \(valueStack.count)")
     }
     return frames.popLast()!
   }
 
   private func getFrame(atDepth i: LabelIndex) throws -> Frame {
     guard i < frames.count else {
-      throw ValidationError.invalidLabelIndex
+      throw ValidationError.invalidLabelIndex(i)
     }
     return frames[frames.count - 1 - Int(i)]
   }
@@ -229,7 +237,7 @@ public struct CodeValidator: ~Copyable {
       return FunctionType(parameters: [], results: [result])
     case .index(let typeIndex):
       guard typeIndex < module.types.count else {
-        throw ValidationError.invalidTypeIndex
+        throw ValidationError.invalidTypeIndex(typeIndex)
       }
       return module.types[Int(typeIndex)]
     }
@@ -245,16 +253,16 @@ public struct CodeValidator: ~Copyable {
       let t1 = try popValue()
       let t2 = try popValue()
       guard t1.isNumeric && t2.isNumeric || t1.isVector && t2.isVector else {
-        throw ValidationError.expectedNonReference
+        throw ValidationError(message: "select types shouldn't be references")
       }
       guard t1 == t2 || t1.isUnknown || t2.isUnknown else {
-        fatalError()
+        throw ValidationError(message: "select types should be the same")
       }
       appendValue(t1.isUnknown ? t2 : t1)
     case .selectT:
       let count = try cursor.read(LEB: UInt32.self)
       guard count == 1 else {
-        throw ValidationError.invalidSelectType
+        throw ValidationError(message: "expected only one type in a typed select")
       }
       let type = try cursor.readValueType()
       try popValue(type: .i32)
@@ -289,7 +297,7 @@ public struct CodeValidator: ~Copyable {
     case .else_:
       let frame = try popFrame()
       guard frame.kind == .if_ else {
-        throw ValidationError.hangingElse
+        throw ValidationError(message: "an else was found with no corresponding `if`")
       }
       appendFrame(kind: .else_, type: frame.type)
 
@@ -307,10 +315,10 @@ public struct CodeValidator: ~Copyable {
     case .brTable:
       let brTable = try cursor.readBrTable()
       let defaultLabelTypes = try getFrame(atDepth: brTable.defaultLabel).labelTypes
-      for label in brTable.labels {
+      for (i, label) in brTable.labels.enumerated() {
         let labelTypes = try getFrame(atDepth: label).labelTypes
         guard labelTypes.count == defaultLabelTypes.count else {
-          throw ValidationError.brTableArityMismatch
+          throw ValidationError(message: "br table arity mismatch: default has \(defaultLabelTypes.count) but label \(i) has \(labelTypes.count)")
         }
         appendValues(try popValuesAndCollect(types: labelTypes))
       }
@@ -321,20 +329,20 @@ public struct CodeValidator: ~Copyable {
     case .localGet:
       let localIndex = try cursor.read(LEB: LocalIndex.self)
       guard localIndex < locals.count else {
-        throw ValidationError.invalidLocalIndex
+        throw ValidationError.invalidLocalIndex(localIndex)
       }
       appendValue(.known(type: locals[Int(localIndex)]))
     case .localSet:
       let localIndex = try cursor.read(LEB: LocalIndex.self)
       guard localIndex < locals.count else {
-        throw ValidationError.invalidLocalIndex
+        throw ValidationError.invalidLocalIndex(localIndex)
       }
       let type = locals[Int(localIndex)]
       try popValue(type: type)
     case .localTee:
       let localIndex = try cursor.read(LEB: LocalIndex.self)
       guard localIndex < locals.count else {
-        throw ValidationError.invalidLocalIndex
+        throw ValidationError.invalidLocalIndex(localIndex)
       }
       let type = locals[Int(localIndex)]
       try popValue(type: type)
@@ -349,7 +357,7 @@ public struct CodeValidator: ~Copyable {
       let index = try cursor.read(LEB: GlobalIndex.self)
       let global = try getGlobal(index: index)
       guard global.mutability == .mutable else {
-        throw ValidationError.invalidGlobalSet
+        throw ValidationError(message: "global.set should set a mutable global")
       }
       try popValue(type: global.valueType)
 
@@ -364,7 +372,7 @@ public struct CodeValidator: ~Copyable {
       let tableIndex = try cursor.read(LEB: TableIndex.self)
       let table = try getTable(index: tableIndex)
       guard table.elementType == .funcref else {
-        throw ValidationError.canOnlyCallFuncref
+        throw ValidationError(message: "can only call function references with call_indirect")
       }
       let type = module.types[Int(typeIndex)]
       try popValue(type: .i32)
@@ -374,15 +382,15 @@ public struct CodeValidator: ~Copyable {
     case .dataDrop:
       let index = try cursor.read(LEB: DataIndex.self)
       guard let dataCount = module.dataCount else {
-        throw ValidationError.missingDataCount
+        throw ValidationError(message: "missing data count but got a data.drop instruction")
       }
       guard index < dataCount else {
-        throw ValidationError.invalidDataIndex
+        throw ValidationError.invalidDataIndex(index)
       }
     case .elemDrop:
       let index = try cursor.read(LEB: ElementIndex.self)
       guard index < module.elements.count else {
-        throw ValidationError.invalidElementIndex
+        throw ValidationError.invalidElementIndex(index)
       }
 
     // Const instructions
@@ -543,8 +551,11 @@ public struct CodeValidator: ~Copyable {
     case .memoryCopy:
       let dst = try cursor.readByte()
       let src = try cursor.readByte()
-      guard dst < module.totalMemories && src < module.totalMemories else {
-        throw ValidationError.invalidMemoryIndex
+      guard dst < module.totalMemories else {
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(dst))
+      }
+      guard src < module.totalMemories else {
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(src))
       }
       try popValue(type: .i32)
       try popValue(type: .i32)
@@ -552,7 +563,7 @@ public struct CodeValidator: ~Copyable {
     case .memoryFill:
       let memoryIndex = try cursor.readByte()
       guard memoryIndex < module.totalMemories else {
-        throw ValidationError.invalidMemoryIndex
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(memoryIndex))
       }
       try popValue(type: .i32)
       try popValue(type: .i32)
@@ -560,7 +571,7 @@ public struct CodeValidator: ~Copyable {
     case .memoryGrow:
       let memoryIndex = try cursor.readByte()
       guard memoryIndex < module.totalMemories else {
-        throw ValidationError.invalidMemoryIndex
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(memoryIndex))
       }
       try popValue(type: .i32)
       appendValue(.known(type: .i32))
@@ -568,18 +579,18 @@ public struct CodeValidator: ~Copyable {
       let dataIndex = try cursor.read(LEB: DataIndex.self)
       let memoryIndex = try cursor.readByte()
       guard memoryIndex < module.totalMemories else {
-        throw ValidationError.invalidMemoryIndex
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(memoryIndex))
       }
       guard let dataCount = module.dataCount else {
-        throw ValidationError.missingDataCount
+        throw ValidationError(message: "missing data count but got a memory.init instruction")
       }
       guard dataIndex < dataCount else {
-        throw ValidationError.invalidDataIndex
+        throw ValidationError.invalidDataIndex(dataIndex)
       }
     case .memorySize:
       let memoryIndex = try cursor.readByte()
       guard memoryIndex < module.totalMemories else {
-        throw ValidationError.invalidMemoryIndex
+        throw ValidationError.invalidMemoryIndex(MemoryIndex(memoryIndex))
       }
       appendValue(.known(type: .i32))
     case .refFunc:
@@ -589,13 +600,16 @@ public struct CodeValidator: ~Copyable {
     case .refIsNull:
       let value = try popValue()
       guard value.isReference else {
-        throw ValidationError.expectedReference
+        guard case let .known(type) = value else {
+          fatalError("shouldn't be possible")
+        }
+        throw ValidationError(message: "expected reference type with ref.is_null, got \(type)")
       }
       appendValue(.known(type: .i32))
     case .refNull:
       let type = try cursor.readValueType()
       guard type.isReference else {
-        throw ValidationError.expectedReference
+        throw ValidationError(message: "expected reference type with ref.null, got \(type)")
       }
       appendValue(.known(type: type))
     case .return_:
@@ -607,7 +621,7 @@ public struct CodeValidator: ~Copyable {
       let dstTable = try getTable(index: dst)
       let srcTable = try getTable(index: src)
       guard dstTable.elementType == srcTable.elementType else {
-        throw ValidationError.tableValueTypeMismatch
+        throw ValidationError(message: "reference type mismatch in table.copy: destination has \(dstTable.elementType) and source has \(srcTable.elementType)")
       }
       try popValue(type: .i32)
       try popValue(type: .i32)
@@ -626,13 +640,13 @@ public struct CodeValidator: ~Copyable {
     case .tableInit:
       let elementIndex = try cursor.read(LEB: ElementIndex.self)
       guard elementIndex < module.elements.count else {
-        throw ValidationError.invalidElementIndex
+        throw ValidationError.invalidElementIndex(elementIndex)
       }
       let tableIndex = try cursor.read(LEB: TableIndex.self)
       let table = try getTable(index: tableIndex)
       let element = module.elements[Int(elementIndex)]
       guard table.elementType == element.type else {
-        throw ValidationError.tableValueTypeMismatch
+        throw ValidationError(message: "reference type mismatch in table.init: table has \(table.elementType) and element has \(element.type)")
       }
       try popValue(type: .i32)
       try popValue(type: .i32)
@@ -645,7 +659,7 @@ public struct CodeValidator: ~Copyable {
     case .tableSize:
       let tableIndex = try cursor.read(LEB: TableIndex.self)
       guard tableIndex < module.totalTables else {
-        throw ValidationError.invalidTableIndex
+        throw ValidationError.invalidTableIndex(tableIndex)
       }
       appendValue(.known(type: .i32))
     }
@@ -656,11 +670,11 @@ public struct CodeValidator: ~Copyable {
   ) throws {
     let memArg = try cursor.readMemArg()
     guard memArg.memoryIndex < module.totalMemories else {
-      throw ValidationError.invalidMemoryIndex
+      throw ValidationError.invalidMemoryIndex(memArg.memoryIndex)
     }
     let size = size ?? UInt32(type.bitWidth!)
     guard 1 << memArg.align <= size / 8 else {
-      throw ValidationError.invalidAlignment
+      throw ValidationError(message: "alignment must not be greater than natural (\(size / 8)), got \(1 << memArg.align)")
     }
     switch kind {
     case .load:
@@ -679,7 +693,7 @@ public struct CodeValidator: ~Copyable {
     }
     let baseIndex = Int(index) - module.importedGlobals
     guard baseIndex < module.globals.count else {
-      throw ValidationError.invalidGlobalIndex
+      throw ValidationError.invalidGlobalIndex(GlobalIndex(baseIndex))
     }
     return module.globals[Int(index) - module.importedGlobals].type
   }
@@ -691,7 +705,7 @@ public struct CodeValidator: ~Copyable {
     }
     let baseIndex = Int(index) - module.importedFunctions
     guard baseIndex < module.functions.count else {
-      throw ValidationError.invalidFunctionIndex
+      throw ValidationError.invalidFunctionIndex(FunctionIndex(baseIndex))
     }
     return module.functions[Int(index) - module.importedFunctions]
   }
@@ -703,7 +717,7 @@ public struct CodeValidator: ~Copyable {
     }
     let baseIndex = Int(index) - module.importedTables
     guard baseIndex < module.tables.count else {
-      throw ValidationError.invalidTableIndex
+      throw ValidationError.invalidTableIndex(TableIndex(baseIndex))
     }
     return module.tables[baseIndex].type
   }
