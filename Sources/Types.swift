@@ -156,9 +156,13 @@ public struct Element {
     case declarative
     case passive
   }
+  public enum References {
+    case expressions([Expression])
+    case indices([FunctionIndex])
+  }
 
   public let type: ValueType
-  public let initExprs: [Expression]
+  public let initExprs: References
   public let mode: Mode
 }
 

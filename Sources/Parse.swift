@@ -510,13 +510,11 @@ public struct Parser: ~Copyable {
       }
     }
 
-    var items: [Expression] = []
+    var items: Element.References
     if !hasExprs {
-      let indices = try parseVector { (parser) in try parser.parseFunctionIndex() }
-      // TODO
-      items = indices.map { (_) in Expression(data: Data()) }
+      items = .indices(try parseVector { (parser) in try parser.parseFunctionIndex() })
     } else {
-      items = try parseVector { (parser) in try parser.parseInitExpression(expected: type) }
+      items = .expressions(try parseVector { (parser) in try parser.parseInitExpression(expected: type) })
     }
 
     return Element(type: type, initExprs: items, mode: mode)
