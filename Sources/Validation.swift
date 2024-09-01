@@ -143,12 +143,17 @@ public struct CodeValidator: ~Copyable {
     functionType = FunctionType(parameters: [], results: [expected])
     appendFrame(kind: .function, type: functionType)
 
+    var seen = 0
     while !frames.isEmpty {
+      guard seen <= 1 else {
+        throw ValidationError(message: "init expr should only have one instruction")
+      }
       let opcode = try cursor.readOpcode()
       guard opcode.isConstant || opcode == .end else {
         throw ValidationError(message: "invalid init expr instruction: \(opcode)")
       }
       try validate(opcode: opcode)
+      seen += 1
     }
     return cursor.pos
   }
